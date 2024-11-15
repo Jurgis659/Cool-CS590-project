@@ -1,0 +1,234 @@
+#include "lygia/sdf/sphereSDF.glsl"
+#include "lygia/sdf/planeSDF.glsl"
+#include "lygia/sdf/cubeSDF.glsl"
+#include "lygia/math/rotate3dY.glsl"
+#include "lygia/math/rotate3dX.glsl"
+#include "lygia/generative/snoise.glsl"
+#include "shapes2d.stoy"
+
+#define MAX_MARCH_STEPS 64
+#define THRESHOLD 0.1
+#define MAX_DISTANCE 32.0
+#define LIGHT_ATTENUATION_FACTOR 10.0
+#define ABSORPTION_COEFFICIENT_B 1.0
+#define ABSORPTION_COEFFICIENT_RG 0.3
+#define AIR_IOR 1.0
+#define WATER_IOR 1.00
+
+#define WATER_ALBEDO 0.7
+
+
+vec3 groundColor = vec3(80., 70., 157.) / 255.;
+vec3 skyColor = vec3(177., 202., 233.) / 255.0;
+vec3 baseWaterColor = vec3(0.0, 0.412, 0.58);
+
+struct Light {
+    vec3 pos;
+    vec3 color;
+};
+
+const Light light0 = Light(vec3(0.0, 10.0, 2.0), vec3(1.0, 1.0, 1.0));
+const Light light1 = Light(vec3(0.0, 1.0, -6.0), vec3(1.0, 1.0, 1.0));
+const Light lights[2] = Light[2](
+    light0,
+    light1
+);
+
+float BeerLambert(float absorptionCoefficient, float distanceTraveled)
+{
+    return exp(-absorptionCoefficient * distanceTraveled);
+}
+
+float GetLightAttenuation(float distanceToLight)
+{
+    return 1.0 / pow(distanceToLight, LIGHT_ATTENUATION_FACTOR);
+}
+
+// Taken from https://iquilezles.org/articles/fbm/
+float fbm( in vec4 x, in float H )
+{    
+    float G = exp2(-H);
+    float f = 1.0;
+    float a = 1.0;
+    float t = 0.0;
+    int numOctaves = 4;
+    for( int i=0; i<numOctaves; i++ )
+    {
+        t += a*snoise(f*x);
+        f *= 2.0;
+        a *= G;
+    }
+    return t;
+}
+
+float opaqueSDF(vec3 p) {
+    float plane = planeSDF(p + vec3(0.0, 2.0, 0.0));
+    return min(plane, sdBoat(p-vec3(0.0,.0, -2.)));
+}
+
+float waterSDF(vec3 p) {
+    p = rotate3dY(0.7) * p;
+    float cube = cubeSDF(p, 1.0);
+    cube += 0.1 * fbm(0.5 * vec4(p, iTime), 1.0);
+    return cube;
+
+}
+
+vec3 calcNormal(vec3 p) {
+    const float h = 0.00001; // replace by an appropriate value
+    const vec2 k = vec2(1,-1);
+    return normalize(k.xyy*opaqueSDF(p+k.xyy*h)+//
+        k.yyx*opaqueSDF(p+k.yyx*h)+//
+        k.yxy*opaqueSDF(p+k.yxy*h)+//
+        k.xxx*opaqueSDF(p+k.xxx*h));
+}
+
+vec3 calcWaterNormal(vec3 p) {
+    const float h = 0.00001; // replace by an appropriate value
+    const vec2 k = vec2(1,-1);
+    return normalize(k.xyy*waterSDF(p+k.xyy*h)+//
+        k.yyx*waterSDF(p+k.yyx*h)+//
+        k.yxy*waterSDF(p+k.yxy*h)+//
+        k.xxx*waterSDF(p+k.xxx*h));
+}
+
+
+
+float opaqueRayMarch(vec3 ro, vec3 rd) {
+    float d = 0.0;
+    float dist_to_obj;
+    vec3 position;
+    for (int i = 0; i < MAX_MARCH_STEPS; i++) {
+        position = ro + d * rd;
+        dist_to_obj = opaqueSDF(position);
+        if (dist_to_obj < THRESHOLD) {
+            return 1.0;
+        }
+        if (d > MAX_DISTANCE) {
+            return 0.0;
+        }
+        d += opaqueSDF(position);
+    }
+    return 0.0;
+}
+
+
+float IntersectVolumetric(in vec3 rayOrigin, in vec3 rayDirection, float maxT)
+{
+    // Precision isn't super important, just want a decent starting point before 
+    // ray marching with fixed steps
+	float precis = 0.05; 
+    
+    if (waterSDF(rayOrigin) > 0.0) {
+        float t = 0.0;
+        for(int i=0; i<100; i++ )
+        {
+            float result = waterSDF( rayOrigin+rayDirection*t);
+            if( result < (precis) || t>maxT ) break;
+            t += result;
+        }
+        return ( t>=maxT ) ? -1.0 : t;
+    } else {
+        float t = 0.5;
+        for(int i=0; i<100; i++ )
+        {
+            float result = -waterSDF( rayOrigin+rayDirection*t);
+            if( result < (precis) || t>maxT ) break;
+            t += result;
+        }
+        return ( t>=maxT ) ? -1.0 : t;
+    }
+}
+
+
+
+// float GetLightVisibility(in vec3 rayOrigin, in vec3 rayDirection, in float maxT, in int maxSteps, in float marchSize) {
+//     float t = 0.0;
+//     float lightVisibility = 1.0;
+//     for(int i = 0; i < maxSteps; i++) {                       
+//         t += marchSize;
+//         if(t > maxT) break;
+
+//         vec3 position = rayOrigin + t*rayDirection;
+//         if(waterSDF(position) < 0.0) {
+//             lightVisibility *= BeerLambert(ABSORPTION_COEFFICIENT, marchSize);
+//         }
+//     }
+//     return lightVisibility;
+// }
+
+vec3 waterRayMarch(vec3 ro, vec3 rd, vec3 skyColor) {
+    float d = 0.0;
+    float dist_to_surface;
+    float march_size = 0.01;
+    vec3 volumetricColor = vec3(0.0);
+    vec3 finalColor;
+    vec3 position;
+    vec3 visibility = vec3(1.0);
+
+    for (int i = 0; i < MAX_MARCH_STEPS || d > MAX_DISTANCE; i++) {
+        d += march_size;
+        position = ro + d * rd;
+        dist_to_surface = -waterSDF(position);
+        bool inWater = dist_to_surface > 0.0;
+        if (inWater) {
+            vec3 prevVisibility = visibility;
+            visibility *= vec3(BeerLambert(ABSORPTION_COEFFICIENT_RG, march_size),
+                                BeerLambert(ABSORPTION_COEFFICIENT_RG, march_size),
+                                BeerLambert(ABSORPTION_COEFFICIENT_B, march_size));
+            vec3 absorptionFromMarch = prevVisibility - visibility;
+
+            for(int lightIndex = 0; lightIndex < lights.length(); lightIndex++) {
+                float lightDistance = length(lights[lightIndex].pos - position);
+                // vec3 lightColor = lights[lightIndex].color * GetLightAttenuation(lightDistance) * GetLightVisibility(position, lights[lightIndex].pos - position, 100.0, 16, 1.0);  
+                vec3 lightColor = lights[lightIndex].color * GetLightAttenuation(lightDistance);
+                volumetricColor += absorptionFromMarch * WATER_ALBEDO * lightColor;
+		    }
+		    volumetricColor += absorptionFromMarch * WATER_ALBEDO * skyColor;
+        }
+    }
+    return volumetricColor;
+}
+
+
+
+
+
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord/iResolution.xy;
+    uv -= 0.5;
+    uv.x *= iResolution.x/iResolution.y;
+
+    float advancement = iTime;
+    //float cameraZ = -10.0 * advancement;
+    float cameraZ = 10.0;
+    float speed = 1.2;
+    float height = 2.1;
+    float intensity = 3.0;
+
+    vec3 rd = normalize(vec3(uv,-1.0));
+    rd = rotate3dX(0.075 * intensity * cos(speed * advancement))*rd;
+    vec3 ro = vec3(0.0, height + intensity * sin(speed * advancement), cameraZ);
+
+    
+
+    vec3 opaqueColor = opaqueRayMarch(ro, rd) < 0.5 ? skyColor : groundColor;
+    float distToWater = IntersectVolumetric(ro, rd, 100.0);
+    vec3 waterColor = vec3(0.0);
+    if (distToWater > 0.0) {
+        vec3 waterIntersection = ro + rd * IntersectVolumetric(ro, rd, 100.0);
+
+        vec3 waterEntryNormal = calcWaterNormal(waterIntersection);
+        vec3 firstRefractedRayDirection = refract(rd, waterEntryNormal, AIR_IOR / WATER_IOR);
+        waterColor = waterRayMarch(waterIntersection, firstRefractedRayDirection, skyColor) * baseWaterColor;
+
+        vec3 firstReflectedRayDirection = reflect(rd, waterEntryNormal);
+        waterColor += 0.1 * (opaqueRayMarch(waterIntersection, firstReflectedRayDirection) < 0.5 ? skyColor : groundColor);
+
+        vec3 waterExitIntersection = waterIntersection + firstRefractedRayDirection * IntersectVolumetric(waterIntersection, firstRefractedRayDirection, 100.0);
+        vec3 secondRefractedRayDirection = refract(rd, -calcWaterNormal(waterExitIntersection), WATER_IOR / AIR_IOR);
+        waterColor += 0.1 * (opaqueRayMarch(waterExitIntersection, secondRefractedRayDirection) < 0.5 ? skyColor : groundColor);
+    } 
+    fragColor = vec4(opaqueColor + waterColor, 1.0);
+}
