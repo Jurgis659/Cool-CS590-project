@@ -1,0 +1,257 @@
+#define MAX_DIST 32.0
+#define MAX_STEPS 256
+#define THRESHOLD .01000
+#include "lygia/sdf/sphereSDF.glsl"
+#include "lygia/generative/snoise.glsl"
+#include "lygia/math/rotate3dX.glsl" 
+#include "lygia/math/rotate3dY.glsl" 
+#include "lygia/math/rotate3dZ.glsl" 
+#include "lygia/sdf/boxSDF.glsl"
+#include "lygia/sdf/planeSDF.glsl"
+#include "lygia/generative/snoise.glsl"
+#include "lygia/space/rotateY.glsl"
+#include "lygia/space/rotateX.glsl"
+#include "lygia/space/rotateZ.glsl"
+#define ROWS 15
+#define COLS 15
+#define clamp01(a) clamp(a,0.0,1.0)
+#define opS(d1,d2) max(-d1,d2)
+
+
+float sdCappedCylinder( vec3 p, float h, float r )
+{
+  vec2 d = abs(vec2(length(p.xz),p.y)) - vec2(r,h);
+  return min(max(d.x,d.y),0.0) + length(max(d,0.0));
+}
+
+
+struct Light {
+    vec3 pos;
+    vec3 color;
+};
+float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5*(a-b)/k, 0.0, 1.0);
+    return mix(a, b, h) - k*h*(1.0-h);
+}
+float prism(vec3 position, float halfWidth1, float halfWidth2, float halfHeight, float halfDepth) {
+    position.x = abs(position.x);
+    position.x -= 0.5 * (halfWidth2 + halfWidth1);
+    vec2 e = vec2(0.5 * (halfWidth2 - halfWidth1), halfHeight);
+    vec2 q = position.xy - e * clamp(dot(position.xy, e) / dot(e, e), -1.0, 1.0);
+    float d1 = length(q);
+    if (q.x < 0.0) {
+        d1 = max(-d1, abs(position.y) - halfHeight);
+    }
+    float d2 = abs(position.z) - halfDepth;
+    return length(max(vec2(d1, d2), 0.0)) + min(max(d1, d2), 0.0)-.001;
+}
+ 
+float sdTrapezoidalPrism(in vec3 position) { 
+    float cornerRadius = 0.01;
+    float halfWidth2 = 0.8; 
+    float halfWidth1 = (halfWidth2 * 0.5) * .5 * 0.5;
+    float halfHeight = (halfWidth2 - halfWidth1) * 0.5;
+    float halfDepth = 0.02;
+    float d = prism(position, halfWidth1, halfWidth2, halfHeight, halfDepth);
+    d -= cornerRadius;
+    return d;
+}
+float sdTrapezoidalPrism2(in vec3 position) { 
+    float cornerRadius = 0.01;
+    float halfWidth2 = 0.9; 
+    float halfWidth1 = .02;
+    float halfHeight = (halfWidth2 - halfWidth1) * 0.5;
+    float halfDepth = 0.02;
+    float d = prism(position, halfWidth1, halfWidth2, halfHeight, halfDepth);
+    d -= cornerRadius;
+    return d;
+}
+
+
+float prismSDF(vec3 position, float halfWidth, float halfHeight, float halfDepth) {
+
+    vec2 e = vec2(halfWidth, -halfHeight);
+    vec2 d1 = vec2(-halfWidth - position.x, max(abs(position.y) - halfHeight, 0.0));
+    vec2 d2 = position.xy - e * clamp(dot(position.xy, e) / dot(e, e), -1.0, 1.0);
+    vec2 d3 = vec2(max(abs(position.x) - halfWidth, 0.0), -halfHeight - position.y); 
+    float d4 = sqrt(min(min(dot(d1, d1), dot(d2, d2)), dot(d3, d3))) * sign(max(max(max(d1.x, d2.x), d2.y), d3.y));
+    float d5 = abs(position.z) - halfDepth;
+    return length(max(vec2(d4, d5), 0.0)) + min(max(d4, d5), 0.0);
+}
+float sdPlane( vec3 p, vec3 n, float h)
+{
+  // n must be normalized
+  return dot(p,n) + h;
+}
+
+vec4 unionS(vec4 a, vec4 b){
+    if(a.x <b.x){
+        return a;
+    }
+    else{
+        return b;
+    }
+}
+vec4 unionSmooth(vec4 a, vec4 b){
+    float m = smin(a.x, b.x, .05);
+    if(a.x <b.x){
+        return vec4(m, a.yzw);
+    }
+    else{
+        return vec4(m, b.yzw);
+    }
+}
+float dot2( in vec2 v ) { return dot(v,v); }
+float dot2( in vec3 v ) { return dot(v,v); }
+float ndot( in vec2 a, in vec2 b ) { return a.x*b.x - a.y*b.y; }
+float sdRhombus( vec3 p, float la, float lb, float h, float ra )
+{
+  p = abs(p);
+  vec2 b = vec2(la,lb);
+  float f = clamp( (ndot(b,b-2.0*p.xz))/dot(b,b), -1.0, 1.0 );
+  vec2 q = vec2(length(p.xz-0.5*b*vec2(1.0-f,1.0+f))*sign(p.x*b.y+p.z*b.x-b.x*b.y)-ra, p.y-h);
+  return min(max(q.x,q.y),0.0) + length(max(q,0.0));
+}
+float sdCappedCone( vec3 p, float h, float r1, float r2 )
+{
+  vec2 q = vec2( length(p.xz), p.y );
+  vec2 k1 = vec2(r2,h);
+  vec2 k2 = vec2(r2-r1,2.0*h);
+  vec2 ca = vec2(q.x-min(q.x,(q.y<0.0)?r1:r2), abs(q.y)-h);
+  vec2 cb = q - k1 + k2*clamp( dot(k1-q,k2)/dot2(k2), 0.0, 1.0 );
+  float s = (cb.x<0.0 && ca.y<0.0) ? -1.0 : 1.0;
+  return s*sqrt( min(dot2(ca),dot2(cb)) ) ;
+}
+
+vec4 airplaneSDF(vec3 p) {
+   //colors
+   vec3 propcolor = vec3(.3);
+   vec3 metalcolor = vec3(.5);
+   vec3 wingcolor = vec3(160.0, 120.0, 0.0)/255.0;
+   vec3 cabincolor = vec3(198,226,227)/255.0;
+    vec3 bodycolor =vec3(148,50.,0)/255.0;
+    //colors 
+
+    p -=vec3(.0, 1.0, .0);
+  
+   // vec4 plane = vec4(planeSDF(p, vec3(0.0, 0.13, .0), vec3(0.0, 0.1, 0.0)), vec3(107.0,142,35)/255.0);
+    p =rotateZ(p, 3.14/2.0);
+
+    vec4 cappedcone = vec4(sdCappedCone(p-vec3(-1.0, .0, .0), 1.5, .35, .15), bodycolor);
+    vec4 front = vec4(sdCappedCone(p-vec3(-1.0, -1.7, .0), .2, .26, .35), metalcolor);
+    vec4 cabin = vec4(boxSDF(p-vec3(-1.2, -.9, .0), vec3(.3, .3, .25)), cabincolor);
+    vec4 front2 = vec4(sdCappedCone(p-vec3(-1.0, -2.0, .0), .1, .04, .08), bodycolor);
+    vec4 wings = vec4(boxSDF(p-vec3(-1.55, -.9, .0), vec3(.0001, .3, 2.0))-.08, wingcolor);
+    //vec4 wings5 = vec4(boxSDF(p-vec3(-.8, -.8, .0), vec3(.0001, .3, 2.0))-.08, bodycolor);
+    vec4 wings2 = vec4(boxSDF(p-vec3(-1.2, 1.3, .0), vec3(.0001, .15, .5))-.03, wingcolor);
+    p =rotateX(p, 3.14/2.0);
+     vec4 wheel = vec4(sdCappedCylinder(p-vec3(-.4, .5, -.8), .02, .13), vec3(.2));
+     vec4 wheel2 = vec4(sdCappedCylinder(p-vec3(-.4, -.5, -.8), .02, .13), vec3(.2));
+      vec4 wheel3 = vec4(sdCappedCylinder(p-vec3(-.8, -.0, 1.4), .02, .08), vec3(.2));
+     vec4 connectwheel = vec4(sdCappedCylinder(p-vec3(-.4, .0, -.8), .5, .04), metalcolor);
+     p = rotateZ(p, 1.0);
+      vec4 connectwheel2 = vec4(sdCappedCylinder(p-vec3(-.5, -.4, -.8), .25, .04), metalcolor);
+       p = rotateZ(p, -1.0);
+        p = rotateZ(p, -1.0);
+      vec4 connectwheel3 = vec4(sdCappedCylinder(p-vec3(-.5, .4, -.8), .25, .04), metalcolor);
+       p = rotateZ(p, 1.0);
+    p =rotateX(p, -3.14/2.0);
+    p = rotateY(p, 3.14/2.0);
+    vec4 wing3 = vec4(sdTrapezoidalPrism(p-vec3(.0, 1.15, 1.1))-.01, wingcolor);
+    p = rotateY(p, -3.14/2.0-3.14);
+    p = rotateX(p, 3.14);
+    vec4 wing4 = vec4(prismSDF(p-vec3(1.4, -1.2, -.0), .25, .3, .005)-.02, wingcolor);
+    p = rotateX(p, -3.14);
+    p = rotateY(p, +3.14/2.0-3.14);
+     p = rotateY(p, -3.14/2.0);
+    p=rotateY(p-vec3(-1.0, -1.95, .0), 50.0*iTime);
+    vec4 prop = vec4(sdRhombus(p-vec3(0., .0, .0), .5, .1, .01,.03), propcolor);
+    
+
+   
+    vec4 combination = unionS(unionS(unionS(unionSmooth(cappedcone, wings), front), front2), prop);
+    combination = unionS(unionSmooth(unionS(unionS(combination, wing3), wing4), cabin), wheel);
+    combination = unionS(unionS(unionS(unionS(unionS(combination, connectwheel), connectwheel2), wheel2), connectwheel3), wheel3);
+    return combination;
+}
+vec3 calcNormal(vec3 p) {
+    const float h = 0.00001; // replace by an appropriate value
+    const vec2 k = vec2(1,-1);
+    return normalize(k.xyy*airplaneSDF(p+k.xyy*h).x+k.yyx*airplaneSDF(p+k.yyx*h).x+k.yxy*airplaneSDF(p+k.yxy*h).x+k.xxx*airplaneSDF(p+k.xxx*h).x);
+}
+ 
+float shadows(vec3 rayOrigin, vec3 light) {
+    float d = 100.0*THRESHOLD;
+    vec3 rayHeading = normalize(light-rayOrigin);
+    float val = 1.0;
+    for(int i = 0; i<MAX_STEPS; i++) {
+        vec3 p = rayOrigin+d*rayHeading;
+        vec4 sd = airplaneSDF(p);
+        if(sd.x<THRESHOLD) {
+            return 0.0;
+        }
+        val = min(val, 8.0*sd.x/d);
+        float distToLight = length(light-p);
+        if(distToLight<THRESHOLD) {
+            return val;
+        }
+        d += min(sd.x, distToLight);
+        if(d>MAX_DIST) {
+            break;
+        }
+    }
+    return 1.0;
+}
+ 
+vec3 lighting(vec3 p) {
+    Light lights[3];
+    lights[0] = Light(vec3(-2., 7., 5.), vec3(1.0));
+    lights[1] = Light(vec3(2., 7., -3.), vec3(.6));
+    lights[2] = Light(vec3(-2., 7., -3.), vec3(.6));
+   
+ 
+    vec3 color = vec3(0.0);
+    vec3 norm = calcNormal(p);
+    for(int i = 0; i<lights.length(); i++) {
+        vec3 toLight = normalize(lights[i].pos-p);
+        color += shadows(p, lights[i].pos)* //
+            clamp(dot(toLight, norm), 0., 1.)* //
+            lights[i].color;
+    }
+    return color;
+}
+ 
+vec3 rayMarch(vec3 rayOrigin, vec3 rayHeading) {
+    float d = 0.0;
+    for(int i = 0; i<MAX_STEPS; i++) {
+        vec3 p = rayOrigin+d*rayHeading;
+        vec4 sd = airplaneSDF(p);
+        vec3 objectColor = sd.yzw;
+        if(sd.x<THRESHOLD) {
+            return (objectColor*lighting(p));
+        }
+        d += sd.x;
+        if(d>MAX_DIST) {
+            break;
+        }
+    }
+    return vec3(135.0,206.0,235.0)/255.0;
+}
+ 
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec3 uv = vec3(fragCoord/iResolution.xy, 1.0);
+    uv.xy -= 0.5;
+    uv.x *= iResolution.x/iResolution.y;
+    float PI = 3.14;
+    //uv = rotateX(vec3(uv.x, uv.y, 0.9), 0.7) *uv;
+    vec3 rd = normalize(vec3(uv.xy,-1.0));
+    rd = rotate3dX(-0.5)*rd; // rotate the camera down
+    
+    rd = rotate3dY((iTime-.2)/2.0)*rd;
+   
+    vec3 ro = vec3(4.0*sin(iTime/2.0), 5.0+sin(iTime/2.0), 5.0*cos(iTime/2.0));
+ 
+    vec3 color = rayMarch(ro, rd);
+ 
+    fragColor = vec4(color, 1.0);
+}
