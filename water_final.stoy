@@ -121,9 +121,11 @@ float opaqueSDF(vec3 p) {
 
 float waterSDF(vec3 p) {
    // p = rotate3dY(0.7) * p;
-    float rect = sdBox(p-vec3(0.0, -2., cameraZ), vec3(5.0, 1.0, 5.0));
-    rect += 0.1 * fbm(0.5 * vec4(p, iTime), 1.0);
-    return rect;
+    //float rect = sdBox(p-vec3(0.0, -2., cameraZ), vec3(5.0, 1.0, 5.0));
+    
+    p.y += 0.1 * fbm(0.5 * vec4(p, iTime), 1.0);
+    float plane = planeSDF(p);
+    return plane;
 
 }
 
@@ -261,36 +263,6 @@ Raymarcher opaqueRayMarch(Raymarcher r, Scene scene) {
 
 
 
-
-float IntersectVolumetric(in vec3 rayOrigin, in vec3 rayDirection, float maxT)
-{
-    // Precision isn't super important, just want a decent starting point before 
-    // ray marching with fixed steps
-	float precis = 0.005; 
-    
-    if (waterSDF(rayOrigin) > 0.0) {
-        float t = 0.0;
-        for(int i=0; i<100; i++ )
-        {
-            float result = waterSDF( rayOrigin+rayDirection*t);
-            if( result < (precis) || t>maxT ) break;
-            t += result;
-        }
-        return ( t>=maxT ) ? -1.0 : t;
-    } else {
-        float t = 0.5;
-        for(int i=0; i<100; i++ )
-        {
-            float result = -waterSDF( rayOrigin+rayDirection*t);
-            if( result < (precis) || t>maxT ) break;
-            t += result;
-        }
-        return ( t>=maxT ) ? -1.0 : t;
-    }
-}
-
-
-
 Raymarcher waterRayMarch(Raymarcher r, Scene scene) {
     // raymarches inside water, then finds the color 
     // refracts and raymarches after exiting the water
@@ -324,6 +296,7 @@ Raymarcher waterRayMarch(Raymarcher r, Scene scene) {
             rFinal.ray = refractedRay;
             rFinal.lighting = volumetricColor;
             rFinal.lighting += 0.2*opaqueRayMarch(rFinal, scene).lighting;
+            //rFinal.ray = Ray(position, rd); // return the ray before refraction in order to do reflection calculations before refraction
             return rFinal;
         }
         // if (dist_to_opaque < THRESHOLD) {
@@ -380,17 +353,49 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     r.shadow = 1.0;
     r.lighting = vec3(0.0);
 
-    r = directRayMarch(r, scene);
 
-    if (r.shape.id == WATER_ID) {
+    if (waterSDF(r.ray.origin) < 0.0) { // if inside the water
+        r = waterRayMarch(r, scene);
+
+        vec3 waterEntryNormal = -calcWaterNormal(r.ray.origin);
 
         // calculate first reflection
         Raymarcher firstReflection = r;
-        firstReflection.ray = Ray(r.ray.origin, reflect(rd, calcWaterNormal(r.ray.origin)));
-        firstReflection = opaqueRayMarch(firstReflection, scene);
-        r.lighting += firstReflection.lighting;
+        firstReflection.ray = Ray(r.ray.origin, reflect(rd, waterEntryNormal));
+        firstReflection = waterRayMarch(firstReflection, scene);
+        vec3 insideColor = firstReflection.lighting;
 
-        r = waterRayMarch(r, scene);
+        // calculate exit refraction
+        Raymarcher firstRefraction = r;
+        firstRefraction.ray = Ray(r.ray.origin, refract(rd, waterEntryNormal, WATER_IOR / AIR_IOR));
+        firstRefraction = opaqueRayMarch(firstRefraction, scene);
+        vec3 outsideColor = firstRefraction.lighting;
+
+        float fresnelFactor = pow(1.0 - dot(-rd, waterEntryNormal), 3.0);
+        r.lighting = insideColor + 0.2 * outsideColor;
+
+    } else {
+        r = directRayMarch(r, scene);
+    
+
+        if (r.shape.id == WATER_ID) {
+            vec3 waterEntryNormal = calcWaterNormal(r.ray.origin);
+
+            // calculate first reflection
+            Raymarcher firstReflection = r;
+            firstReflection.ray = Ray(r.ray.origin, reflect(rd, waterEntryNormal));
+            firstReflection = opaqueRayMarch(firstReflection, scene);
+            vec3 reflectedColor = firstReflection.lighting;
+
+            // calculate entry refraction
+            Raymarcher firstRefraction = r;
+            firstRefraction.ray = Ray(r.ray.origin, refract(rd, waterEntryNormal, AIR_IOR / WATER_IOR));
+            firstRefraction = waterRayMarch(firstRefraction, scene);
+            vec3 insideColor = firstRefraction.lighting;
+
+            float fresnelFactor = pow(1.0 - dot(-rd, waterEntryNormal), 3.0);
+            r.lighting = insideColor * (1.0 - fresnelFactor) + reflectedColor * fresnelFactor;
+        }
     }
 
     
