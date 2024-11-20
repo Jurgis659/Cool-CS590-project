@@ -1,6 +1,6 @@
 #define MAX_DIST 32.0
-#define MAX_STEPS 64
-#define THRESHOLD 0.01
+#define MAX_STEPS 256
+#define THRESHOLD2 .01000
 #include "lygia/sdf/sphereSDF.glsl"
 #include "lygia/generative/snoise.glsl"
 #include "lygia/math/rotate3dX.glsl" 
@@ -24,11 +24,11 @@ float sdCappedCylinder( vec3 p, float h, float r )
 }
 
 
-struct Light {
+struct Light2 {
     vec3 pos;
     vec3 color;
 };
-float smin(float a, float b, float k) {
+float smin2(float a, float b, float k) {
     float h = clamp(0.5 + 0.5*(a-b)/k, 0.0, 1.0);
     return mix(a, b, h) - k*h*(1.0-h);
 }
@@ -68,23 +68,8 @@ float prismSDF(vec3 position, float halfWidth, float halfHeight, float halfDepth
     float d5 = abs(position.z) - halfDepth;
     return length(max(vec2(d4, d5), 0.0)) + min(max(d4, d5), 0.0);
 }
-float hyperbolicParaboloid(vec3 p, float a, float b, vec3 boundsMin, vec3 boundsMax) {
-    // Implicit equation of hyperbolic paraboloid: z = x²/a² - y²/b²
-    float h = p.z - (p.x * p.x) / (a * a) + (p.y * p.y) / (b * b);
-    
-    // Signed distance approximation
-    float sdf = h / sqrt(1.0 + (2.0 * p.x / (a * a)) * (2.0 * p.x / (a * a)) +
-                            (2.0 * p.y / (b * b)) * (2.0 * p.y / (b * b)));
-    
-    // Restrict the space to the bounding box
-    vec3 q = max(boundsMin - p, vec3(0.0)) + max(p - boundsMax, vec3(0.0));
-    float boxDist = length(q);
-    
-    // Combine paraboloid and bounding box
-    return max(sdf, boxDist);
-}
 
-float sdBoat(vec3 pos){
+float sdBoat2(vec3 pos){
     float ret = 2000.;
     //body
    // pos = rotateX(pos, 0.15*sin(iTime));
@@ -119,11 +104,11 @@ vec3 bendBest( vec3 p )
     return vec3(m*p.xy,p.z);
 }
 
-float sdPlane( vec3 p, vec3 n, float h)
+/*float sdPlane( vec3 p, vec3 n, float h)
 {
   // n must be normalized
   return dot(p,n) + h;
-}
+}*/
 
 vec4 unionS(vec4 a, vec4 b){
     if(a.x <b.x){
@@ -134,7 +119,7 @@ vec4 unionS(vec4 a, vec4 b){
     }
 }
 vec4 unionSmooth(vec4 a, vec4 b){
-    float m = smin(a.x, b.x, .05);
+    float m = smin2(a.x, b.x, .05);
     if(a.x <b.x){
         return vec4(m, a.yzw);
     }
@@ -144,13 +129,13 @@ vec4 unionSmooth(vec4 a, vec4 b){
 }
 
  
-vec4 scene(vec3 p) {
+vec4 boatfinalSDF(vec3 p) {
     // float noise = snoise(p,iTime);
     
    
     
     p -=vec3(.0, 1.0, .0);
-    vec4 plane = vec4(planeSDF(p, vec3(0.0, 0.13, .0), vec3(0.0, 0.1, 0.0)), vec3(107.0,142,35)/255.0);
+    //vec4 plane = vec4(planeSDF(p, vec3(0.0, 0.13, .0), vec3(0.0, 0.1, 0.0)), vec3(107.0,142,35)/255.0);
     float texture = 0.5 * (1.0+cos(200.0 * (p.x)));
     float texture2 = 0.5 * (1.0+cos(200.0 * (p.z)));
     vec3 boatcolor = mix(vec3(.5, .3, .2), vec3(.0), texture-texture2);
@@ -159,7 +144,7 @@ vec4 scene(vec3 p) {
    
     p = rotateZ(p, snoise(vec4(vec3(.0), iTime/10.0))/2.0);
     p = rotateY(p, snoise(vec4(vec3(.0), iTime/10.0))/2.0);
-    float boat = sdBoat(p);
+    float boat = sdBoat2(p);
      vec4 sitting = vec4(boxSDF(p-vec3(.0, .35, -1.5), vec3(.35, .02, .15)), boatcolor);
     vec4 bendedBox = vec4(bendBest(p), vec3(.4));
     vec3 boundsMin = vec3(-0.9, -2.0, -.2);
@@ -180,40 +165,34 @@ vec4 scene(vec3 p) {
     vec4 boxtest = vec4(boxSDF(p, vec3(1.4)), vec3(1.0));
      vec4 boxtest2 = vec4(boxSDF(p-vec3(0.3, 1.0, 0.0), vec3(1.0, 1.0,1.0)), vec3(1.0));
     vec4 sail = vec4(prismSDF(p-vec3(.18, 2.9, .0), .9, 1.7, .02),vec3(.9));
- 
+    
     float stiebas2 = boxSDF(p-vec3(0.19, 1.2, .0), vec3(0.9, .03, 0.03)); // stiebas 2
-    vec4 combination =  unionS(unionS(unionS(unionS(plane, vec4(boat, boatcolor)), sail), vec4(stiebas2, vec3(boatcolor))), steering);
-    //p = rotateY(p, 3.14/2.0+3.14);
-    vec4 hyper = vec4(hyperbolicParaboloid(p-vec3(0.0, 2.4, -1.0), 3.0, 4.0, boundsMin, boundsMax), vec3(1.0));
-    vec4 hyper2 = vec4(hyperbolicParaboloid(p-vec3(.0, 2.0, -2.0), 2.0, 2.0, boundsMin, boundsMax), vec3(.0));
-    vec4 hyper3 = vec4(max(-hyper.x, hyper2.x), vec3(1.0));
-    vec4 bettersail = hyper;
+    vec4 combination =  unionS(unionS(unionS(vec4(boat, boatcolor), sail), vec4(stiebas2, vec3(boatcolor))), steering);
     
    
-    //combination = unionS(combination, bettersail);
-    //combination = unionS(unionS(combination, hyper), hyper2);
+ 
     combination = unionS(unionS(unionS(unionS(cylinder, combination), sail2), steering2), sitting);
     return combination; 
 }
-vec3 calcNormal(vec3 p) {
+vec3 calcNormal2(vec3 p) {
     const float h = 0.00001; // replace by an appropriate value
     const vec2 k = vec2(1,-1);
-    return normalize(k.xyy*scene(p+k.xyy*h).x+k.yyx*scene(p+k.yyx*h).x+k.yxy*scene(p+k.yxy*h).x+k.xxx*scene(p+k.xxx*h).x);
+    return normalize(k.xyy*boatfinalSDF(p+k.xyy*h).x+k.yyx*boatfinalSDF(p+k.yyx*h).x+k.yxy*boatfinalSDF(p+k.yxy*h).x+k.xxx*boatfinalSDF(p+k.xxx*h).x);
 }
  
 float shadows(vec3 rayOrigin, vec3 light) {
-    float d = 100.0*THRESHOLD;
+    float d = 100.0*THRESHOLD2;
     vec3 rayHeading = normalize(light-rayOrigin);
     float val = 1.0;
     for(int i = 0; i<MAX_STEPS; i++) {
         vec3 p = rayOrigin+d*rayHeading;
-        vec4 sd = scene(p);
-        if(sd.x<THRESHOLD) {
+        vec4 sd = boatfinalSDF(p);
+        if(sd.x<THRESHOLD2) {
             return 0.0;
         }
         val = min(val, 8.0*sd.x/d);
         float distToLight = length(light-p);
-        if(distToLight<THRESHOLD) {
+        if(distToLight<THRESHOLD2) {
             return val;
         }
         d += min(sd.x, distToLight);
@@ -225,14 +204,14 @@ float shadows(vec3 rayOrigin, vec3 light) {
 }
  
 vec3 lighting(vec3 p) {
-    Light lights[3];
-    lights[0] = Light(vec3(-2., 7., 5.), vec3(1.0));
-    lights[1] = Light(vec3(2., 7., -3.), vec3(.6));
-    lights[2] = Light(vec3(-2., 7., -3.), vec3(.6));
+    Light2 lights[3];
+    lights[0] = Light2(vec3(-2., 7., 5.), vec3(1.0));
+    lights[1] = Light2(vec3(2., 7., -3.), vec3(.6));
+    lights[2] = Light2(vec3(-2., 7., -3.), vec3(.6));
    
  
     vec3 color = vec3(0.0);
-    vec3 norm = calcNormal(p);
+    vec3 norm = calcNormal2(p);
     for(int i = 0; i<lights.length(); i++) {
         vec3 toLight = normalize(lights[i].pos-p);
         color += shadows(p, lights[i].pos)* //
@@ -246,9 +225,9 @@ vec3 rayMarch(vec3 rayOrigin, vec3 rayHeading) {
     float d = 0.0;
     for(int i = 0; i<MAX_STEPS; i++) {
         vec3 p = rayOrigin+d*rayHeading;
-        vec4 sd = scene(p);
+        vec4 sd = boatfinalSDF(p);
         vec3 objectColor = sd.yzw;
-        if(sd.x<THRESHOLD) {
+        if(sd.x<THRESHOLD2) {
             return (objectColor*lighting(p));
         }
         d += sd.x;
@@ -259,11 +238,10 @@ vec3 rayMarch(vec3 rayOrigin, vec3 rayHeading) {
     return vec3(135.0,206.0,235.0)/255.0;
 }
  
-void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+void mainImage2(out vec4 fragColor, in vec2 fragCoord) {
     vec3 uv = vec3(fragCoord/iResolution.xy, 1.0);
     uv.xy -= 0.5;
     uv.x *= iResolution.x/iResolution.y;
-    float PI = 3.14;
     //uv = rotateX(vec3(uv.x, uv.y, 0.9), 0.7) *uv;
     vec3 rd = normalize(vec3(uv.xy,-1.0));
     rd = rotate3dX(-0.5)*rd; // rotate the camera down
