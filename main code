@@ -1,0 +1,520 @@
+#include "lygia/sdf/sphereSDF.glsl"
+#include "lygia/sdf/planeSDF.glsl"
+#include "lygia/sdf/cubeSDF.glsl"
+#include "lygia/math/rotate3dY.glsl"
+#include "lygia/math/rotate3dX.glsl"
+#include "lygia/generative/snoise.glsl"
+#include "shapes2d.stoy"
+#include "boatfinal.stoy"
+#include "airplaneSDF.stoy"
+
+#define MAX_MARCH_STEPS 128
+#define THRESHOLD 0.01
+#define MAX_DISTANCE 32.0
+#define LIGHT_ATTENUATION_FACTOR 2.0
+#define ABSORPTION_COEFFICIENT_B 1.0
+#define ABSORPTION_COEFFICIENT_RG 0.3
+#define AIR_IOR 1.0
+#define WATER_IOR 1.33
+#define WATER_ALBEDO 0.7
+
+#define SHADOW_CONSTANT 2.0
+
+#define NUM_SHAPES 5
+#define NUM_LIGHTS 6
+#define WATER_ID 0
+#define BOATBODY_ID 1
+#define BOATSAIL_ID 2
+#define PLANEBODY_ID 3
+#define PLANECABIN_ID 4
+#define NO_SHAPE_ID 999
+
+#define advancement 5.0*fract(0.05*iTime)
+//#define cameraZ (-10.0 * advancement)
+#define cameraZ 0.0
+
+vec3 groundColor = vec3(0., 10., 10.) / 255.;
+vec3 skyColor = vec3(177., 202., 233.) / 255.0;
+vec3 baseWaterColor = vec3(0.0, 0.412, 0.58);
+
+struct Shape {
+    int id;
+    vec3 color;
+    float indexOfRefraction;
+    float opacity; // 1 if opaque, 0 if not (like water)
+};
+
+struct Light {
+    vec3 pos;
+    vec3 color;
+};
+
+struct Ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct Raymarcher {
+    Ray ray;
+    Shape shape;
+    int steps;
+    float dist;
+    float shadow;
+    vec3 lighting;
+};
+
+struct Scene {
+    Shape[NUM_SHAPES] shapes;
+    Light[NUM_LIGHTS] lights;
+    vec3 cameraPos;
+};
+vec3 getShapeColor(int ID, vec3 p, Scene scene){
+    if(ID==BOATBODY_ID){
+            float texture = 0.5 * (1.0+cos(200.0 * (p.x)));
+     float texture2 = 0.5 * (1.0+cos(200.0 * (p.z)));
+        vec3 boatcolor = mix(vec3(.5, .3, .2), vec3(.0), texture-texture2);
+        return boatcolor;
+    }
+    else if(ID ==NO_SHAPE_ID){
+        return skyColor;
+    }
+    else{
+        return scene.shapes[ID].color;
+    }
+}
+
+Scene sceneInit() {
+    Scene s;
+    Light light0 = Light(vec3(0.0, 10.0, 2.0 -cameraZ), vec3(1.0, 1.0, 1.0));
+    Light light1 = Light(vec3(0.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
+    Light light2 = Light(vec3(-3.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
+    Light light3 = Light(vec3(1.0 ,0.0, .0 - cameraZ), vec3(1.0));
+    Light light4 =  Light(vec3(4.0 ,8.0, -1.0 -cameraZ), vec3(1.0));
+    Light light5 = Light(vec3(-1.0 ,0.0, .0 - cameraZ), vec3(1.0));
+
+    Shape water;
+    water.id = WATER_ID;
+    water.color = vec3(0.0, 0.0, 0.0);
+    water.indexOfRefraction = WATER_IOR;
+    water.opacity = 0.0;
+    s.shapes[WATER_ID] = water;
+
+  
+    Shape boatbody;
+    boatbody.id = BOATBODY_ID;
+    boatbody.color = vec3(1.0, 1.0, .0);
+    boatbody.indexOfRefraction = 1.0;
+    boatbody.opacity = 1.0;
+    s.shapes[BOATBODY_ID] = boatbody;
+
+
+
+   
+    Shape boatsail;
+    boatsail.id = BOATSAIL_ID;
+    boatsail.color = vec3(1.0, 1.0, 1.0);
+    boatsail.indexOfRefraction = 1.0;
+    boatsail.opacity = 1.0;
+    s.shapes[BOATSAIL_ID] = boatsail;
+
+    Shape planebody;
+    planebody.id = PLANEBODY_ID;
+    planebody.color = vec3(1.0, .0, .0);
+    planebody.indexOfRefraction =1.0;
+    planebody.opacity = 1.0;
+    s.shapes[PLANEBODY_ID] = planebody; 
+
+    Shape planecabin;
+    planecabin.id = PLANECABIN_ID;
+    planecabin.color = vec3(1.0, .0, .0);
+    planecabin.indexOfRefraction =1.0;
+    planecabin.opacity = 1.0;
+    s.shapes[PLANECABIN_ID] = planecabin; 
+
+
+    
+
+
+
+    s.lights = Light[6](light0, light1, light2, light3, light4, light5);
+
+    return s;
+}
+
+float BeerLambert(float absorptionCoefficient, float distanceTraveled)
+{
+    return exp(-absorptionCoefficient * distanceTraveled);
+}
+
+float GetLightAttenuation(float distanceToLight)
+{
+    return 1.0 / pow(distanceToLight, LIGHT_ATTENUATION_FACTOR);
+}
+
+// Taken from https://iquilezles.org/articles/fbm/
+float fbm( in vec4 x, in float H )
+{    
+    float G = exp2(-H);
+    float f = 1.0;
+    float a = 1.0;
+    float t = 0.0;
+    int numOctaves = 4;
+    for( int i=0; i<numOctaves; i++ )
+    {
+        t += a*snoise(f*x);
+        f *= 2.0;
+        a *= G;
+    }
+    return t;
+}
+
+float opaqueSDF(vec3 p) {
+    return  min(min(boatfinalSDF(p-vec3(0.0, -0.75, -5.0)).x, boatsailSDF(p-vec3(0.0, -0.75, -5.0)).x), planeSDF(p));
+}
+
+float waterSDF(vec3 p) {
+   // p = rotate3dY(0.7) * p;
+    //float rect = sdBox(p-vec3(0.0, -2., cameraZ), vec3(5.0, 1.0, 5.0));
+    
+    p.y += 0.1 * fbm(0.25 * vec4(p, iTime), 1.0);
+    float plane = planeSDF(p);
+    return plane;
+
+}
+
+float combinedSDF(vec3 p) {
+    return min(opaqueSDF(p), waterSDF(p));
+}
+
+float getShapeSDF(int ID, vec3 p){
+    if(ID ==WATER_ID){
+        return waterSDF(p);
+    }
+    if(ID == BOATBODY_ID){
+        return boatfinalSDF(p-vec3(0.0, -0.75, -5.0)).x;
+    }
+    if(BOATSAIL_ID == ID){
+        return boatsailSDF(p-vec3(0.0, -0.75, -5.0)).x;
+    }
+    
+
+}
+int closestObjId(vec3 p) {
+    int smallest =0;
+    float mn = 1000000.0;
+    for(int i =0; i<NUM_SHAPES; i++){
+      if(mn > getShapeSDF(i, p)){
+            mn = getShapeSDF(i, p);
+            smallest = i;
+      } 
+    }
+    if(mn> MAX_DISTANCE){
+        smallest = NO_SHAPE_ID;
+    }
+
+    return smallest;
+}
+
+Shape shapeFromId(Scene scene, int id) {
+    if (id == NO_SHAPE_ID) {
+        return Shape(NO_SHAPE_ID, skyColor, 1.0, 1.0);
+    }
+    return scene.shapes[id];
+}
+
+vec3 calcNormal(vec3 p) {
+    const float h = 0.00001; 
+    const vec2 k = vec2(1,-1);
+    return normalize(k.xyy*opaqueSDF(p+k.xyy*h)+//
+        k.yyx*opaqueSDF(p+k.yyx*h)+//
+        k.yxy*opaqueSDF(p+k.yxy*h)+//
+        k.xxx*opaqueSDF(p+k.xxx*h));
+}
+
+vec3 calcWaterNormal(vec3 p) {
+    const float h = 0.0005; 
+    const vec2 k = vec2(1, -1);
+    return normalize(
+        k.xyy * waterSDF(p + k.xyy * h) +
+        k.yyx * waterSDF(p + k.yyx * h) +
+        k.yxy * waterSDF(p + k.yxy * h) +
+        k.xxx * waterSDF(p + k.xxx * h)
+    );
+}
+
+
+
+
+
+
+
+vec3 lightRayMarch(Raymarcher r, Light light, Scene scene) {
+    // raymarches towards light to calculate the color from that light
+    float d = 0.2;
+    float dist_to_obj;
+    float dist_to_light;
+    float min_dist_to_obj = 999.0;
+    vec3 position;
+    vec3 ro = r.ray.origin;
+    vec3 rd = normalize(light.pos - ro);
+    
+    float res = 1.0; // for soft shadows
+
+    for (int i = 0; i < MAX_MARCH_STEPS && d < MAX_DISTANCE; i++) {
+        position = ro + d * rd;
+        dist_to_obj = opaqueSDF(position);
+        dist_to_light = length(light.pos - position);
+        res = min(res, SHADOW_CONSTANT * dist_to_obj / d);
+        if (dist_to_obj < THRESHOLD) {
+            return vec3(0.0);
+        }
+        d += min(dist_to_obj, dist_to_light);
+    }
+    return light.color * res;
+    
+}
+
+vec3 lighting(Raymarcher r, Scene scene) {
+    if (r.shape.id == NO_SHAPE_ID) return vec3(1.0);
+    vec3 lightColor = vec3(0.0);
+    vec3 normal = calcNormal(r.ray.origin);
+    for (int i = 0; i < NUM_LIGHTS; i++) {
+        Light light = scene.lights[i];
+
+        vec3 toLight = normalize(light.pos - r.ray.origin);
+        vec3 directLight = dot(toLight, normal) * light.color;
+
+        lightColor += directLight * lightRayMarch(r, light, scene);
+    }
+    return clamp(lightColor, vec3(0.0), vec3(1.0));
+}
+
+Raymarcher directRayMarch(Raymarcher r, Scene scene) {
+    // stops upon hitting any object
+    float d = 0.0;
+    float dist_to_obj;
+    vec3 position;
+    vec3 ro = r.ray.origin;
+    vec3 rd = r.ray.direction;
+    int object_id = NO_SHAPE_ID;
+    int i;
+    for (i = r.steps; i < MAX_MARCH_STEPS && d < MAX_DISTANCE; i++) {
+        position = ro + d * rd;
+        dist_to_obj = combinedSDF(position);
+        if (dist_to_obj < THRESHOLD) {
+            object_id = closestObjId(position);
+            break;
+        }
+        d += combinedSDF(position);
+    }
+
+    Raymarcher rFinal = r;
+    rFinal.dist = d;
+    rFinal.steps = i;
+    rFinal.ray = Ray(position, rd);
+    rFinal.shape = shapeFromId(scene, object_id);
+    rFinal.shadow = r.shadow;
+    rFinal.lighting = getShapeColor(rFinal.shape.id, position, scene) * lighting(rFinal, scene);
+    return rFinal;
+    
+}
+
+Raymarcher opaqueRayMarch(Raymarcher r, Scene scene) {
+    // stops upon hitting any opaque object
+    float d = 0.0;
+    float dist_to_obj;
+    vec3 position;
+    vec3 ro = r.ray.origin;
+    vec3 rd = r.ray.direction;
+    int object_id = NO_SHAPE_ID;
+    int i;
+    for (i = r.steps; i < MAX_MARCH_STEPS && d < MAX_DISTANCE; i++) {
+        position = ro + d * rd;
+        dist_to_obj = opaqueSDF(position);
+        if (dist_to_obj < THRESHOLD) {
+            object_id = closestObjId(position);
+            break;
+        }
+        d += opaqueSDF(position);
+    }
+
+    Raymarcher rFinal = r;
+    rFinal.dist = d;
+    rFinal.steps = i;
+    rFinal.ray = Ray(position, rd);
+    rFinal.shape = shapeFromId(scene, object_id);
+    rFinal.shadow = r.shadow;
+    rFinal.lighting = getShapeColor(rFinal.shape.id, position, scene) * lighting(rFinal, scene);
+    return rFinal;
+    
+}
+
+
+
+Raymarcher waterRayMarch(Raymarcher r, Scene scene) {
+    // raymarches inside water, then finds the color 
+    // refracts and raymarches after exiting the water
+    // if hits an opaque object inside the water, finds the color
+    float d = 0.5;
+    float dist_to_surface;
+    float dist_to_opaque;
+    float march_size = 0.1;
+    vec3 volumetricColor = vec3(0.0);
+    vec3 finalColor;
+    vec3 position;
+    vec3 visibility = vec3(1.0);
+
+    vec3 ro = r.ray.origin;
+    vec3 rd = r.ray.direction;
+    int i;
+
+    Raymarcher rFinal = r;
+
+
+    for (i = r.steps; i < MAX_MARCH_STEPS && d < MAX_DISTANCE; i++) {
+        d += march_size;
+        position = ro + d * rd;
+        dist_to_surface = -waterSDF(position);
+        dist_to_opaque = opaqueSDF(position);
+        bool inWater = dist_to_surface > 0.0;
+        if (!inWater) {
+            Ray refractedRay;
+            refractedRay.origin = position;
+            refractedRay.direction = refract(rd, -calcWaterNormal(position), WATER_IOR / AIR_IOR);
+            rFinal.ray = refractedRay;
+            rFinal.lighting = volumetricColor;
+            rFinal.lighting += 0.2*opaqueRayMarch(rFinal, scene).lighting;
+            //rFinal.ray = Ray(position, rd); // return the ray before refraction in order to do reflection calculations before refraction
+            return rFinal;
+        }
+        // if (dist_to_opaque < THRESHOLD) {
+        //     rFinal.shape = shapeFromId(scene, closestObjId(position));
+        //     rFinal.lighting += 0.2 * rFinal.shape.color;
+        //     break;
+        // }
+        vec3 prevVisibility = visibility;
+        visibility *= vec3(BeerLambert(ABSORPTION_COEFFICIENT_RG, march_size),
+                            BeerLambert(ABSORPTION_COEFFICIENT_RG, march_size),
+                            BeerLambert(ABSORPTION_COEFFICIENT_B, march_size));
+        vec3 absorptionFromMarch = prevVisibility - visibility;
+
+        for(int lightIndex = 0; lightIndex < scene.lights.length(); lightIndex++) {
+            float lightDistance = length(scene.lights[lightIndex].pos - position);
+            // vec3 lightColor = lights[lightIndex].color * GetLightAttenuation(lightDistance) * GetLightVisibility(position, lights[lightIndex].pos - position, 100.0, 16, 1.0);  
+            vec3 lightColor = scene.lights[lightIndex].color * GetLightAttenuation(lightDistance);
+            volumetricColor += absorptionFromMarch * WATER_ALBEDO * lightColor;
+        }
+        volumetricColor += absorptionFromMarch * WATER_ALBEDO * baseWaterColor;
+    }
+
+    rFinal.ray = Ray(position, rd);
+    rFinal.lighting += volumetricColor;
+    rFinal.steps = i;
+    rFinal.dist = d;
+    return rFinal;
+}
+
+
+
+
+
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord/iResolution.xy;
+    uv -= 0.5;
+    uv.x *= iResolution.x/iResolution.y;
+
+   // float cameraZ = 10.0;
+    float speed = 1.2;
+    float height = 0.25;
+    float intensity = 1.4;
+
+    vec3 rd = normalize(vec3(uv,-1.0));
+    rd = rotate3dX(0.3 * intensity * cos(speed * advancement))*rd;
+    vec3 ro = vec3(0.0, height + intensity * sin(speed * advancement), cameraZ);
+
+    Scene scene = sceneInit();
+
+    Raymarcher r;
+    r.ray = Ray(ro, rd);
+    r.steps = 0;
+    r.dist = 0.0;
+    r.shadow = 1.0;
+    r.lighting = vec3(0.0);
+
+
+    if (waterSDF(r.ray.origin) < 0.0) { // if inside the water
+        r = waterRayMarch(r, scene);
+
+        vec3 waterEntryNormal = -calcWaterNormal(r.ray.origin);
+
+        // calculate first reflection
+        Raymarcher firstReflection = r;
+        firstReflection.ray = Ray(r.ray.origin, reflect(rd, waterEntryNormal));
+        firstReflection = waterRayMarch(firstReflection, scene);
+        vec3 insideColor = firstReflection.lighting;
+
+        // calculate exit refraction
+        Raymarcher firstRefraction = r;
+        firstRefraction.ray = Ray(r.ray.origin, refract(rd, waterEntryNormal, WATER_IOR / AIR_IOR));
+        firstRefraction = opaqueRayMarch(firstRefraction, scene);
+        vec3 outsideColor = firstRefraction.lighting;
+
+        float fresnelFactor = pow(1.0 - dot(-rd, waterEntryNormal), 3.0);
+        r.lighting = insideColor + 0.2 * outsideColor;
+
+    } else {
+        r = directRayMarch(r, scene);
+    
+
+        if (r.shape.id == WATER_ID) {
+            vec3 waterEntryNormal = calcWaterNormal(r.ray.origin);
+
+            // calculate first reflection
+            Raymarcher firstReflection = r;
+            firstReflection.ray = Ray(r.ray.origin, reflect(rd, waterEntryNormal));
+            firstReflection = opaqueRayMarch(firstReflection, scene);
+            vec3 reflectedColor = firstReflection.lighting;
+
+            // calculate entry refraction
+            Raymarcher firstRefraction = r;
+            firstRefraction.ray = Ray(r.ray.origin, refract(rd, waterEntryNormal, AIR_IOR / WATER_IOR));
+            firstRefraction = waterRayMarch(firstRefraction, scene);
+            vec3 insideColor = firstRefraction.lighting;
+
+            float fresnelFactor = pow(1.0 - dot(-rd, waterEntryNormal), 3.0);
+            r.lighting = insideColor * (1.0 - fresnelFactor) + reflectedColor * fresnelFactor;
+        }
+    }
+
+    
+
+    
+//     float distToWater = IntersectVolumetric(ro, rd, 100.0);
+//     vec3 waterColor = vec3(0.0);
+//     if (distToWater > 0.0) {
+//     vec3 waterIntersection = ro + rd * distToWater;
+
+//     vec3 waterEntryNormal = calcWaterNormal(waterIntersection);
+//     vec3 refractedDir = refract(rd, waterEntryNormal, AIR_IOR / WATER_IOR);
+
+//     vec3 insideWaterColor = waterRayMarch(waterIntersection, refractedDir, skyColor);
+
+//     float distToExit = IntersectVolumetric(waterIntersection, refractedDir, 100.0);
+//     vec3 exitPoint = waterIntersection + refractedDir * distToExit;
+//     vec3 exitNormal = calcWaterNormal(exitPoint);
+//     vec3 exitDir = refract(refractedDir, -exitNormal, WATER_IOR / AIR_IOR);
+
+//     vec3 outsideColor = (opaqueRayMarch(exitPoint, exitDir) < 0.5 ? skyColor : groundColor);
+
+//     float fresnelFactor = pow(1.0 - dot(-rd, waterEntryNormal), 3.0);
+//     vec3 reflectionDir = reflect(rd, waterEntryNormal);
+//     vec3 reflectedColor = (opaqueRayMarch(waterIntersection, reflectionDir) < 0.5 ? skyColor : groundColor);
+
+//     waterColor = insideWaterColor * (1.0 - fresnelFactor) + reflectedColor * fresnelFactor;
+//     waterColor += outsideColor * 0.1; 
+// }
+
+    vec3 color = r.lighting;
+    fragColor = vec4(color, 1.0);
+}
