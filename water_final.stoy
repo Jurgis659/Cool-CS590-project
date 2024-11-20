@@ -5,8 +5,9 @@
 #include "lygia/math/rotate3dX.glsl"
 #include "lygia/generative/snoise.glsl"
 #include "shapes2d.stoy"
+#include "boatfinal.stoy"
 
-#define MAX_MARCH_STEPS 64
+#define MAX_MARCH_STEPS 128
 #define THRESHOLD 0.01
 #define MAX_DISTANCE 32.0
 #define LIGHT_ATTENUATION_FACTOR 2.0
@@ -16,10 +17,13 @@
 #define WATER_IOR 1.33
 #define WATER_ALBEDO 0.7
 
-#define NUM_SHAPES 2
-#define NUM_LIGHTS 2
+#define SHADOW_CONSTANT 2.0
+
+#define NUM_SHAPES 3
+#define NUM_LIGHTS 3
 #define WATER_ID 0
 #define OPAQUE_ID 1
+#define BOAT_ID 2
 #define NO_SHAPE_ID 999
 
 #define advancement 5.0*fract(0.05*iTime)
@@ -67,6 +71,7 @@ Scene sceneInit() {
     Scene s;
     Light light0 = Light(vec3(0.0, 10.0, 2.0 -cameraZ), vec3(1.0, 1.0, 1.0));
     Light light1 = Light(vec3(0.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
+    Light light2 = Light(vec3(3.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
 
     Shape water;
     water.id = WATER_ID;
@@ -82,7 +87,15 @@ Scene sceneInit() {
     opaque.opacity = 1.0;
     s.shapes[OPAQUE_ID] = opaque;
 
-    s.lights = Light[2](light0, light1);
+    Shape boat;
+    boat.id = BOAT_ID;
+    boat.color = vec3(1.0, 1.0, 0.0);
+    boat.indexOfRefraction = 1.0;
+    boat.opacity = 1.0;
+    s.shapes[BOAT_ID] = boat;
+
+
+    s.lights = Light[3](light0, light1, light2);
 
     return s;
 }
@@ -115,15 +128,14 @@ float fbm( in vec4 x, in float H )
 }
 
 float opaqueSDF(vec3 p) {
-    float plane = planeSDF(p + vec3(0.0, 2.0, 0.0));
-    return plane;
+    return  boatfinalSDF(p-vec3(0.0, -0.2, -5.0)).x;
 }
 
 float waterSDF(vec3 p) {
    // p = rotate3dY(0.7) * p;
     //float rect = sdBox(p-vec3(0.0, -2., cameraZ), vec3(5.0, 1.0, 5.0));
     
-    p.y += 0.1 * fbm(0.5 * vec4(p, iTime), 1.0);
+    p.y += 0.1 * fbm(0.25 * vec4(p, iTime), 1.0);
     float plane = planeSDF(p);
     return plane;
 
@@ -135,8 +147,15 @@ float combinedSDF(vec3 p) {
 
 
 int closestObjId(vec3 p) {
-    if (min(waterSDF(p), opaqueSDF(p)) > MAX_DISTANCE) return NO_SHAPE_ID;
-    return waterSDF(p) < opaqueSDF(p) ? WATER_ID : OPAQUE_ID;
+    int smallest;
+    if(waterSDF(p) < boatfinalSDF(p-vec3(0.0, 0.5, -5.0)).x){
+        smallest = WATER_ID; 
+    }
+    else{
+        smallest = BOAT_ID;
+    }
+
+    return smallest;
 }
 
 Shape shapeFromId(Scene scene, int id) {
@@ -174,31 +193,43 @@ vec3 calcWaterNormal(vec3 p) {
 
 vec3 lightRayMarch(Raymarcher r, Light light, Scene scene) {
     // raymarches towards light to calculate the color from that light
-    float d = 0.0;
+    float d = 0.2;
     float dist_to_obj;
+    float dist_to_light;
+    float min_dist_to_obj = 999.0;
     vec3 position;
     vec3 ro = r.ray.origin;
     vec3 rd = normalize(light.pos - ro);
+    
+    float res = 1.0; // for soft shadows
 
     for (int i = 0; i < MAX_MARCH_STEPS && d < MAX_DISTANCE; i++) {
         position = ro + d * rd;
-        dist_to_obj = combinedSDF(position);
+        dist_to_obj = opaqueSDF(position);
+        dist_to_light = length(light.pos - position);
+        res = min(res, SHADOW_CONSTANT * dist_to_obj / d);
         if (dist_to_obj < THRESHOLD) {
             return vec3(0.0);
         }
-        d += combinedSDF(position);
+        d += min(dist_to_obj, dist_to_light);
     }
-    return light.color;
+    return light.color * res;
     
 }
 
 vec3 lighting(Raymarcher r, Scene scene) {
+    if (r.shape.id == NO_SHAPE_ID) return vec3(1.0);
     vec3 lightColor = vec3(0.0);
+    vec3 normal = calcNormal(r.ray.origin);
     for (int i = 0; i < NUM_LIGHTS; i++) {
         Light light = scene.lights[i];
-        lightColor += lightRayMarch(r, light, scene);
+
+        vec3 toLight = normalize(light.pos - r.ray.origin);
+        vec3 directLight = dot(toLight, normal) * light.color;
+
+        lightColor += directLight * lightRayMarch(r, light, scene);
     }
-    return lightColor, vec3(0.0), vec3(1.0);
+    return clamp(lightColor, vec3(0.0), vec3(1.0));
 }
 
 Raymarcher directRayMarch(Raymarcher r, Scene scene) {
@@ -301,6 +332,7 @@ Raymarcher waterRayMarch(Raymarcher r, Scene scene) {
         }
         // if (dist_to_opaque < THRESHOLD) {
         //     rFinal.shape = shapeFromId(scene, closestObjId(position));
+        //     rFinal.lighting += 0.2 * rFinal.shape.color;
         //     break;
         // }
         vec3 prevVisibility = visibility;
