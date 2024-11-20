@@ -71,7 +71,7 @@ Scene sceneInit() {
     Scene s;
     Light light0 = Light(vec3(0.0, 10.0, 2.0 -cameraZ), vec3(1.0, 1.0, 1.0));
     Light light1 = Light(vec3(0.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
-    Light light2 = Light(vec3(3.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
+    Light light2 = Light(vec3(-3.0, 1.0, -6.0 -cameraZ), vec3(1.0, 1.0, 1.0));
 
     Shape water;
     water.id = WATER_ID;
@@ -128,7 +128,7 @@ float fbm( in vec4 x, in float H )
 }
 
 float opaqueSDF(vec3 p) {
-    return  boatfinalSDF(p-vec3(0.0, -0.2, -5.0)).x;
+    return  boatfinalSDF(p-vec3(0.0, -0.75, -5.0)).x;
 }
 
 float waterSDF(vec3 p) {
@@ -148,7 +148,7 @@ float combinedSDF(vec3 p) {
 
 int closestObjId(vec3 p) {
     int smallest;
-    if(waterSDF(p) < boatfinalSDF(p-vec3(0.0, 0.5, -5.0)).x){
+    if(waterSDF(p) < boatfinalSDF(p-vec3(0.0, -0.75, -5.0)).x){
         smallest = WATER_ID; 
     }
     else{
